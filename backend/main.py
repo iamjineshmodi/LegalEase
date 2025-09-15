@@ -11,6 +11,8 @@ from typing import List, Dict, Any
 from pydantic import BaseModel
 import json
 import re
+import uvicorn
+from dotenv import load_dotenv
 
 app = FastAPI(title="LegalEase API", version="1.0.0")
 
@@ -24,7 +26,9 @@ app.add_middleware(
 )
 
 # Configure Gemini AI
+load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# print("Gemini API Key Set:", os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 class DocumentAnalysis(BaseModel):
@@ -198,17 +202,17 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
+class SummaryRequest(BaseModel):
+    text: str
 
-
-@app.post("/short-summary")
-async def short_summary(text):
+@app.post("/short-summary") 
+async def short_summary(request: SummaryRequest):
     try:
-        summary_response = model.generate_content(create_summary_prompt(text))
+        summary_response = model.generate_content(create_summary_prompt(request.text))
         summary = summary_response.text.strip()
         return {"summary": summary}
     except Exception as e:  
         raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
-
 
 @app.post("/risk-analysis")
 async def risk_analysis(text): 
@@ -323,5 +327,4 @@ async def get_supported_languages():
     }
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
