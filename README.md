@@ -66,7 +66,6 @@ curl -X POST "http://localhost:8000/glossary-definitions" \
   -d '{
     "text": "This is a legal contract. The parties hereto acknowledge and agree that any representations, warranties, and covenants contained herein shall be binding and enforceable to the fullest extent permissible under applicable law. The obligations stipulated are subject to conditions precedent, and any waiver thereof must be executed in writing by the duly authorized signatories. In the event of a material breach, the non-defaulting party shall be entitled to equitable relief, including but not limited to specific performance and injunctive remedies. Furthermore, all indemnification provisions shall survive termination and shall inure to the benefit of the successors and assigns of the parties."
   }'
-
 ```
 
 ``` 
@@ -75,8 +74,23 @@ RESPONSE::
 ```
         
 
+5. \translate
 
+```
+curl -X POST "http://localhost:8000/translate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "This is a legal contract. The parties hereto acknowledge and agree that any representations, warranties, and covenants contained herein shall be binding and enforceable to the fullest extent permissible under applicable law. The obligations stipulated are subject to conditions precedent, and any waiver thereof must be executed in writing by the duly authorized signatories. In the event of a material breach, the non-defaulting party shall be entitled to equitable relief, including but not limited to specific performance and injunctive remedies. Furthermore, all indemnification provisions shall survive termination and shall inure to the benefit of the successors and assigns of the parties.",
+    "target_language": "hindi"
+  }'
+```
 
+``` 
+RESPONSE:
+
+{"translated_text":"यह एक विधिक अनुबंध है।  यहाँ पर पक्षकार स्वीकार करते हैं और सहमत होते हैं कि इसमें निहित कोई भी निरूपण, वारंटी और करार लागू कानून के अंतर्गत अधिकतम सीमा तक बाध्यकारी और प्रवर्तनीय होंगे।  निर्धारित दायित्व पूर्व शर्तों के अधीन हैं, और इनकी किसी भी छूट को विधिवत अधिकृत हस्ताक्षरकर्ताओं द्वारा लिखित में क्रियान्वित किया जाना चाहिए।  गंभीर उल्लंघन की स्थिति में, डिफ़ॉल्ट न करने वाले पक्ष को इक्विटेबल राहत का अधिकार होगा, जिसमें विशेष प्रदर्शन और निषेधात्मक उपचार शामिल हैं, लेकिन इन्हीं तक सीमित नहीं हैं।  इसके अलावा, सभी क्षतिपूर्ति प्रावधान समापन के बाद भी प्रभावी रहेंगे और पक्षकारों के उत्तराधिकारियों और अधिग्रहीताओं को लाभान्वित करेंगे।"}
+
+```
 
 show homepage with a big action towards uploading pdf/txt/docx
 
