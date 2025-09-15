@@ -198,94 +198,77 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
-@app.post("/upload-document", response_model=DocumentAnalysis)
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload and analyze a legal document (PDF, TXT, or DOCX)
-    Returns summary, risk alerts, paragraph summaries, and glossary
-    """
-    
-    # Validate file type
-    allowed_types = ["application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
-    if file.content_type not in allowed_types and not file.filename.endswith(('.pdf', '.txt', '.docx')):
-        raise HTTPException(status_code=400, detail="File type not supported. Please upload PDF, TXT, or DOCX files.")
-    
+
+
+@app.post("/short-summary")
+async def short_summary(text):
     try:
-        # Read file content
-        file_bytes = await file.read()
+        summary_response = model.generate_content(create_summary_prompt(text))
+        summary = summary_response.text.strip()
+        return {"summary": summary}
+    except Exception as e:  
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
+
+
+@app.post("/risk-analysis")
+async def risk_analysis(text): 
+    try:
+        risk_response = model.generate_content(create_risk_analysis_prompt(text))
+        risk_text = risk_response.text.strip()
         
-        # Extract text based on file type
-        if file.filename.endswith('.pdf') or file.content_type == "application/pdf":
-            document_text = extract_text_from_pdf(file_bytes)
-        elif file.filename.endswith('.docx'):
-            document_text = extract_text_from_docx(file_bytes)
-        else:  # TXT file
-            document_text = extract_text_from_txt(file_bytes)
+        # Clean and parse JSON response
+        risk_text = re.sub(r'^```json\s*', '', risk_text)
+        risk_text = re.sub(r'\s*```$', '', risk_text)
         
-        if not document_text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text from the document")
-        
-        # Limit text length for API calls (Gemini has token limits)
-        if len(document_text) > 30000:
-            document_text = document_text[:30000] + "..."
-        
-        # Generate analysis using Gemini AI
         try:
-            # 1. Generate summary
-            summary_response = model.generate_content(create_summary_prompt(document_text))
-            summary = summary_response.text.strip()
-            
-            # 2. Generate risk analysis
-            risk_response = model.generate_content(create_risk_analysis_prompt(document_text))
-            risk_text = risk_response.text.strip()
-            
-            # Clean and parse JSON response
-            risk_text = re.sub(r'^```json\s*', '', risk_text)
-            risk_text = re.sub(r'\s*```$', '', risk_text)
-            
-            try:
-                risk_alerts = json.loads(risk_text)
-            except json.JSONDecodeError:
-                risk_alerts = [{"level": "medium", "title": "Unable to parse risk analysis", "description": risk_text}]
-            
-            # 3. Generate paragraph summaries
-            para_response = model.generate_content(create_paragraph_summary_prompt(document_text))
-            para_text = para_response.text.strip()
-            
-            para_text = re.sub(r'^```json\s*', '', para_text)
-            para_text = re.sub(r'\s*```$', '', para_text)
-            
-            try:
-                paragraph_summaries = json.loads(para_text)
-            except json.JSONDecodeError:
-                paragraph_summaries = [{"paragraph": "Unable to parse", "summary": para_text}]
-            
-            # 4. Generate glossary
-            glossary_response = model.generate_content(create_glossary_prompt(document_text))
-            glossary_text = glossary_response.text.strip()
-            
-            glossary_text = re.sub(r'^```json\s*', '', glossary_text)
-            glossary_text = re.sub(r'\s*```$', '', glossary_text)
-            
-            try:
-                glossary = json.loads(glossary_text)
-            except json.JSONDecodeError:
-                glossary = [{"term": "Parsing Error", "definition": glossary_text}]
-            
-            return DocumentAnalysis(
-                summary=summary,
-                risk_alerts=risk_alerts,
-                paragraph_summaries=paragraph_summaries,
-                glossary=glossary
-            )
-            
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error analyzing document with AI: {str(e)}")
-            
-    except HTTPException:
-        raise
+            risk_alerts = json.loads(risk_text)
+        except json.JSONDecodeError:
+            risk_alerts = [{"level": "medium", "title": "Unable to parse risk analysis", "description": risk_text}]
+        
+        return {"risk_alerts": risk_alerts}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating risk analysis: {str(e)}")
+    
+
+@app.post("/each-paragraph-summaries")
+async def paragraph_summaries(text):
+    try:
+        para_response = model.generate_content(create_paragraph_summary_prompt(text))
+        para_text = para_response.text.strip()
+        
+        para_text = re.sub(r'^```json\s*', '', para_text)
+        para_text = re.sub(r'\s*```$', '', para_text)
+        
+        try:
+            paragraph_summaries = json.loads(para_text)
+        except json.JSONDecodeError:
+            paragraph_summaries = [{"paragraph": "Unable to parse", "summary": para_text}]
+        
+        return {"paragraph_summaries": paragraph_summaries}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating paragraph summaries: {str(e)}")
+
+
+@app.post("/glossary-definitions")
+async def glossary_definitions(text):
+    try:
+        glossary_response = model.generate_content(create_glossary_prompt(text))
+        glossary_text = glossary_response.text.strip()
+        
+        glossary_text = re.sub(r'^```json\s*', '', glossary_text)
+        glossary_text = re.sub(r'\s*```$', '', glossary_text)
+        
+        try:
+            glossary = json.loads(glossary_text)
+        except json.JSONDecodeError:
+            glossary = [{"term": "Parsing Error", "definition": glossary_text}]
+        
+        return {"glossary": glossary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating glossary: {str(e)}")
+
+
+
 
 @app.post("/translate")
 async def translate_text(request: TranslationRequest):
