@@ -4,7 +4,7 @@ FASTAPIII
 Simlpify your legal documents in 1 click
 
 ## BACKEND EXAMPLES AND HOW TO USE:
-got to backend directory
+go to backend directory
 ```
     python3 main.py 
 ```
