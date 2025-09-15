@@ -88,7 +88,7 @@ def create_summary_prompt(text: str) -> str:
     Potential Risks: Identify any potential risks or pitfalls that a party should be aware of. For instance, in a loan contract, this could be high - interest rates or strict repayment terms.
     Overall Purpose: Explain the overall purpose and intent of the document in simple terms, so that a non - legal professional can understand its significance.
 
-    Do NOT invent information. Only use what’s in the document.
+    Do NOT invent information. Only use what's in the document.
 
     Here is the legal document text for your analysis:
     {text}
@@ -114,7 +114,7 @@ def create_risk_analysis_prompt(text: str) -> str:
 
     Rules:
     - Only include risks actually stated in the document.
-    - If something is unclear, skip it — don’t guess.
+    - If something is unclear, skip it — don't guess.
     - Do NOT list generic warnings like “laws may change.”
     - Focus on what affects the user directly: money, freedom, privacy, access, or penalties.
 
@@ -124,62 +124,58 @@ def create_risk_analysis_prompt(text: str) -> str:
     Return only valid JSON array:
     """
 
-def create_paragraph_summary_prompt(text: str) -> str:
+def create_paragraph_by_paragraph_summary_prompt(text: str) -> str:
     return f"""
-    You are a legal expert. Break down this legal document paragraph by paragraph and provide simple explanations.
-    Return your response as a JSON array with objects containing:
-    - paragraph: the original paragraph text (first 100 characters)
-    - summary: simple explanation of what this paragraph means
-    
-    Document text:
-    {text}
+    You are a patient, empathetic legal guide for non-lawyers. Your task is to take this legal document paragraph by paragraph and translate each one into clear, simple, everyday language — while preserving all critical meaning.
+
+    For EACH paragraph in the document:
+
+    1. Quote the original text exactly (keep it short — max 1-2 sentences per quote).
+    2. Explain it in plain English: Rewrite it as if you're talking to a friend who has never read a contract. Use no legal jargon.
+    3. Why it matters: Explain what this means for the person reading it — their rights, obligations, money, privacy, or freedom.
+    4. Hidden risk or trap: What could go wrong if they don't understand this? (e.g., automatic renewal, fees, loss of rights, liability)
+    5. Actionable tip: What should they DO right now? (e.g., “Save this email,” “Call them before signing,” “Ask for this in writing”)
+
+    Format your response in a JSON RESPONSE AS THIS:
+
+    --- {{
+    "Paragraph 1" : "Plain English: [Your clear rewrite] + Why it matters: [Impact on user]  + Any Risk/Trap: [What they might miss]  + Tip: [One concrete next step]" , 
+
+    "Paragraph 2" : "Plain English: [Your clear rewrite] + Why it matters: [Impact on user]  + Any Risk/Trap: [What they might miss]  + Tip: [One concrete next step]"  
+    }}
+
+    Rules:
+    - Do NOT summarize the whole document. Go paragraph by paragraph.
+    - Do NOT invent terms or assume outside knowledge. Only use what's written.
+    - If a paragraph is irrelevant (e.g., boilerplate jurisdiction clause), say: “This is standard legal filler — it doesn't affect your day-to-day rights.”
+    - Keep explanations detailed but concise — aim for 50-100 words per paragraph.
+
+    Here is the full document text:{text}
     
     Return only valid JSON array:
     """
 
 def create_glossary_prompt(text: str) -> str:
     return f"""
-    You are a patient, empathetic legal guide for non-lawyers. Your task is to take this legal document paragraph by paragraph and translate each one into clear, simple, everyday language — while preserving all critical meaning.
-
-    For EACH paragraph in the document:
-
-    1. **Quote the original text exactly** (keep it short — max 1–2 sentences per quote).
-    2. **Explain it in plain English**: Rewrite it as if you’re talking to a friend who has never read a contract. Use no legal jargon.
-    3. **Why it matters**: Explain what this means for the person reading it — their rights, obligations, money, privacy, or freedom.
-    4. **Hidden risk or trap**: What could go wrong if they don’t understand this? (e.g., automatic renewal, fees, loss of rights, liability)
-    5. **Actionable tip**: What should they DO right now? (e.g., “Save this email,” “Call them before signing,” “Ask for this in writing”)
-
-    Format your response like this:
-
-    ---
-    **Paragraph 1**:  
-    *Original*: [Insert exact text here]  
-    *Plain English*: [Your clear rewrite]  
-    *Why it matters*: [Impact on user]  
-    *Risk/Trap*: [What they might miss]  
-    *Tip*: [One concrete next step]  
-
-    **Paragraph 2**:  
-    *Original*: [...]  
-    *Plain English*: [...]  
-    *Why it matters*: [...]  
-    *Risk/Trap*: [...]  
-    *Tip*: [...]  
-
-    ... (continue for every paragraph)
-
-    ---
+    You are a plain-language legal translator. Your task is to scan this document and create a JSON object that maps every unique legal term or jargon phrase — exactly as it appears in the text — to its simplest, everyday English meaning.
 
     Rules:
-    - Do NOT summarize the whole document. Go paragraph by paragraph.
-    - Do NOT invent terms or assume outside knowledge. Only use what’s written.
-    - If a paragraph is irrelevant (e.g., boilerplate jurisdiction clause), say: “This is standard legal filler — it doesn’t affect your day-to-day rights.”
-    - Keep explanations detailed but concise — aim for 50–100 words per paragraph.
+    - ONLY include words or phrases that are actual legal terms used in the document.
+    - DO NOT include common words like “party,” “agreement,” “date,” or “sign” unless they have a specific legal meaning in context (e.g., “indemnify”).
+    - DO NOT repeat any term — each key must be unique.
+    - DO NOT invent definitions. Use only what's implied by context in the document.
+    - Use simple, conversational language — explain like you’re talking to someone who never read a contract.
+    - Output MUST be valid JSON with this structure: {{ "legal_word": "simple meaning", ... }}
+    - If no legal terms are found, return an empty object: {{}}
+    - Do not add comments, explanations, or markdown.
 
-    Here is the full document text:
+    Examples of good mappings:
+    "liquidated damages": "a fixed fee you pay if you break the contract"
+    "automatic renewal": "the contract renews itself unless you cancel in time"
+    "indemnify": "you promise to pay if someone else gets sued because of this agreement"
 
-    {text}
-    
+    Here is the document text: {text}
+
     Return only valid JSON array:
     """
 
@@ -215,9 +211,9 @@ async def short_summary(request: SummaryRequest):
         raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
 
 @app.post("/risk-analysis")
-async def risk_analysis(text): 
+async def risk_analysis(request: SummaryRequest): 
     try:
-        risk_response = model.generate_content(create_risk_analysis_prompt(text))
+        risk_response = model.generate_content(create_risk_analysis_prompt(request.text))
         risk_text = risk_response.text.strip()
         
         # Clean and parse JSON response
@@ -235,9 +231,9 @@ async def risk_analysis(text):
     
 
 @app.post("/each-paragraph-summaries")
-async def paragraph_summaries(text):
+async def paragraph_summaries(request: SummaryRequest):
     try:
-        para_response = model.generate_content(create_paragraph_summary_prompt(text))
+        para_response = model.generate_content(create_paragraph_by_paragraph_summary_prompt(request.text))
         para_text = para_response.text.strip()
         
         para_text = re.sub(r'^```json\s*', '', para_text)
@@ -254,9 +250,9 @@ async def paragraph_summaries(text):
 
 
 @app.post("/glossary-definitions")
-async def glossary_definitions(text):
+async def glossary_definitions(request: SummaryRequest):
     try:
-        glossary_response = model.generate_content(create_glossary_prompt(text))
+        glossary_response = model.generate_content(create_glossary_prompt(request.text))
         glossary_text = glossary_response.text.strip()
         
         glossary_text = re.sub(r'^```json\s*', '', glossary_text)
