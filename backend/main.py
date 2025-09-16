@@ -13,8 +13,10 @@ import json
 import re
 import uvicorn
 from dotenv import load_dotenv
+from routers import link_router
 
 app = FastAPI(title="LegalEase API", version="1.0.0")
+
 
 # CORS middleware for frontend connection
 app.add_middleware(
@@ -190,6 +192,9 @@ def create_translation_prompt(text: str, language: str) -> str:
     """
 
 # API Routes
+
+app.include_router(link_router.router)
+
 @app.get("/")
 async def root():
     return {"message": "LegalEase API is running"}
@@ -321,6 +326,13 @@ async def get_supported_languages():
             {"code": "urdu", "name": "Urdu"}
         ]
     }
+
+# class LinkRequest(BaseModel):
+#     link: str
+
+# @app.post("/process_link/")
+# def process_link(request: LinkRequest):
+#     return {"received_link": request.link}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
