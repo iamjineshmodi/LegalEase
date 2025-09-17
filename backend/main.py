@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 import json
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Google Drive and AI imports
 from google.oauth2 import service_account
@@ -47,7 +49,6 @@ class DocumentAnalysisResponse(BaseModel):
     upload_date: datetime
     summary: str
     risk_alerts: List[Dict[str, Any]]
-    paragraph_summaries: List[Dict[str, str]]
     glossary: List[Dict[str, str]]
 
 class ChatMessage(BaseModel):
@@ -67,6 +68,7 @@ drive_service = None
 pinecone_index = None
 sentence_model = None
 gemini_model = None
+executor = ThreadPoolExecutor(max_workers=4)  # For parallel processing
 
 def get_user_credentials() -> Credentials:
     """Load stored OAuth token.json and refresh if needed."""
@@ -77,6 +79,7 @@ def get_user_credentials() -> Credentials:
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     return creds
+
 # --- Service Initialization ---
 def initialize_services():
     global drive_service, pinecone_index, sentence_model, gemini_model
@@ -98,8 +101,8 @@ def initialize_services():
             from pinecone import ServerlessSpec
             pinecone_client.create_index(
                 name=index_name,
-                dimension=1536,  # Update to your embedding dimension
-                metric='euclidean',
+                dimension=384,  # Fixed dimension for all-MiniLM-L6-v2
+                metric='cosine',  # Cosine is generally better for text embeddings
                 spec=ServerlessSpec(
                     cloud='aws',
                     region=os.getenv('PINECONE_REGION', 'us-west-2')
@@ -217,35 +220,51 @@ def clean_json_response(text: str) -> Any:
         print("JSON Decode Error. Raw text:", text)
         return None
 
+def generate_gemini_content(prompt: str) -> str:
+    """Wrapper function to make Gemini API calls synchronous for thread execution."""
+    try:
+        response = gemini_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini generation error: {e}")
+        return ""
 
 async def analyze_with_gemini(text: str) -> Dict[str, Any]:
-    """Runs a full suite of analyses using Gemini AI."""
+    """Runs analysis using Gemini AI with parallel processing."""
     # Prompts
     summary_prompt = f"Provide a concise, 150-word summary of the key legal points and implications of this document:\n\n{text}"
     risk_prompt = f"Scan this legal text. Identify clauses that could cost money, limit rights, or cause harm. List ONLY risks. Format as a JSON array of objects, each with 'severity' ('HIGH', 'MEDIUM', 'LOW') and 'description' (under 15 words):\n\n{text}"
-    para_summary_prompt = f"Break down this document paragraph by paragraph. For each, explain it in simple English. Format as a JSON array of objects, each with 'paragraph_number' and 'summary':\n\n{text}"
-    glossary_prompt = f"Create a JSON object mapping every unique legal term in this document to its simple English meaning:\n\n{text}"
+    glossary_prompt = f"Create a JSON object mapping all the important legal terms which would be difficult to understand for normal user who doesn't know much about legal jargons in this document to its simple English meaning:\n\n{text}"
 
     try:
-        # Generate all responses
-        summary_response = gemini_model.generate_content(summary_prompt)
-        risk_response = gemini_model.generate_content(risk_prompt)
-        para_response = gemini_model.generate_content(para_summary_prompt)
-        glossary_response = gemini_model.generate_content(glossary_prompt)
+        # Run all Gemini requests in parallel using ThreadPoolExecutor
+        loop = asyncio.get_event_loop()
+        
+        tasks = [
+            loop.run_in_executor(executor, generate_gemini_content, summary_prompt),
+            loop.run_in_executor(executor, generate_gemini_content, risk_prompt),
+            loop.run_in_executor(executor, generate_gemini_content, glossary_prompt)
+        ]
+        
+        # Wait for all tasks to complete
+        summary_text, risk_text, glossary_text = await asyncio.gather(*tasks)
 
         # Process and clean responses
-        summary = summary_response.text.strip()
-        risks = clean_json_response(risk_response.text) or []
-        para_summaries = clean_json_response(para_response.text) or []
-        glossary = clean_json_response(glossary_response.text) or {}
+        summary = summary_text
+        risks = clean_json_response(risk_text) or []
+        glossary = clean_json_response(glossary_text) or {}
 
         # Convert glossary object to list of objects
-        glossary_list = [{"term": k, "definition": v} for k, v in glossary.items()]
+        glossary_list = []
+        for k, v in glossary.items():
+            if isinstance(v, dict) and "simple_meaning" in v:
+                glossary_list.append({"term": k, "definition": v["simple_meaning"]})
+            else:
+                glossary_list.append({"term": k, "definition": str(v)})
 
         return {
             "summary": summary,
             "risk_alerts": risks,
-            "paragraph_summaries": para_summaries,
             "glossary": glossary_list
         }
     except Exception as e:
@@ -297,19 +316,32 @@ async def upload_document(
     if not text.strip():
         raise HTTPException(status_code=400, detail="Could not extract text from document.")
     
-    # 2. Perform AI Analysis with Gemini
-    analysis_results = await analyze_with_gemini(text)
-    for para in analysis_results["paragraph_summaries"]:
-        para["paragraph_number"] = str(para["paragraph_number"])
-        document_id = str(uuid.uuid4())
-        print("Document ID:", document_id)
+    # Generate document ID early
+    document_id = str(uuid.uuid4())
+    print("Document ID:", document_id)
+    
+    # 2. Start AI Analysis and Drive upload in parallel
+    analysis_task = asyncio.create_task(analyze_with_gemini(text))
+    
     # 3. Upload to Google Drive (Optional, non-blocking)
     folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
     print(f"Folder ID: {folder_id}")
-    drive_file_id = upload_to_drive(file_content, file.filename, folder_id) if folder_id else None
     
-    # 4. Chunk text and store in Pinecone for RAG
+    # Run drive upload in executor to not block
+    if folder_id:
+        drive_upload_task = asyncio.get_event_loop().run_in_executor(
+            executor, upload_to_drive, file_content, file.filename, folder_id
+        )
+    else:
+        drive_upload_task = asyncio.create_task(asyncio.sleep(0, result=None))
+    
+    # 4. Prepare chunking and metadata
     chunks = chunk_text(text)
+    
+    # Wait for both analysis and drive upload
+    analysis_results, drive_file_id = await asyncio.gather(analysis_task, drive_upload_task)
+    
+    # 5. Store in Pinecone
     metadata = {
         'document_id': document_id,
         'filename': file.filename,
@@ -319,7 +351,7 @@ async def upload_document(
     }
     store_in_pinecone(chunks, document_id, metadata)
     
-    # 5. Return the comprehensive analysis
+    # 6. Return the comprehensive analysis
     return DocumentAnalysisResponse(
         document_id=document_id,
         filename=file.filename,
@@ -385,7 +417,7 @@ async def get_user_documents(user: dict = Depends(get_current_user)):
     try:
         # A dummy query to fetch metadata by filtering
         response = pinecone_index.query(
-            vector=[0] * 384,
+            vector=[0] * 384,  # Updated to match embedding dimension
             filter={'user_id': user['user_id']},
             top_k=1000,
             include_metadata=True
@@ -450,6 +482,11 @@ async def get_supported_languages():
             {"code": "urdu", "name": "Urdu"}
         ]
     }
+
+# Cleanup executor on shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    executor.shutdown(wait=True)
 
 if __name__ == "__main__":
     import uvicorn
