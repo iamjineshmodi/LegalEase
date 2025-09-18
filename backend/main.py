@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ from datetime import datetime
 import json
 import re
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Core ML/AI Imports ---
@@ -29,7 +30,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import google.generativeai as genai
 # Transformers
-from sentence_transformers import SentenceTransformer, CrossEncoder # MODIFIED: Added SentenceTransformer back
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 # --- Configuration & Initialization ---
@@ -68,19 +69,38 @@ class TranslationRequest(BaseModel):
     text: str
     target_language: str
 
+class ServiceStatus(BaseModel):
+    models_loaded: bool
+    services_ready: bool
+    loading_progress: Dict[str, bool]
+
 # --- Constants & Global Variables ---
 GENERATION_MODEL_NAME = "gemini-2.5-flash-lite"
-# MODIFIED: Define local embedding model
 EMBEDDING_MODEL_NAME = "all-mpnet-base-v2" 
-PINECONE_DIMENSION = 768  # Dimension for all-mpnet-base-v2
+PINECONE_DIMENSION = 768
 
+# Global service variables
 drive_service = None
 pinecone_index = None
 gemini_model = None
-sentence_model = None # ADDED: For local embeddings
+sentence_model = None
 splade_encoder = None
 cross_encoder = None
 executor = ThreadPoolExecutor(max_workers=4)
+
+# Loading status tracking
+loading_status = {
+    "drive_service": False,
+    "pinecone": False,
+    "gemini": False,
+    "sentence_model": False,
+    "splade_encoder": False,
+    "cross_encoder": False,
+    "all_ready": False
+}
+
+# Thread lock for status updates
+status_lock = threading.Lock()
 
 # --- Sparse Vector Encoder (SPLADE) ---
 class SpladeEncoder:
@@ -114,7 +134,7 @@ class SpladeEncoder:
     def encode_query(self, query: str) -> dict:
         return self._encode(query)
 
-# --- Service Initialization ---
+# --- Service Initialization Functions ---
 def get_user_credentials() -> Optional[Credentials]:
     token_path = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "token.json")
     if not os.path.exists(token_path):
@@ -125,20 +145,36 @@ def get_user_credentials() -> Optional[Credentials]:
         creds.refresh(Request())
     return creds
 
-@app.on_event("startup")
-async def startup_event():
+def update_loading_status(service: str, status: bool):
+    """Thread-safe status update"""
+    with status_lock:
+        loading_status[service] = status
+        # Check if all services are ready
+        required_services = ["pinecone", "gemini", "sentence_model", "splade_encoder", "cross_encoder"]
+        loading_status["all_ready"] = all(loading_status[service] for service in required_services)
+        print(f"Service {service}: {'✓' if status else '✗'} | All ready: {loading_status['all_ready']}")
+
+async def initialize_services_background():
+    """Background task to initialize all heavy services"""
     global drive_service, pinecone_index, gemini_model, sentence_model, splade_encoder, cross_encoder
     
-    # Google Drive
+    print("🚀 Starting background service initialization...")
+    
+    # Google Drive (optional, non-blocking)
     try:
         credentials = get_user_credentials()
         if credentials:
             drive_service = build('drive', 'v3', credentials=credentials)
+            update_loading_status("drive_service", True)
+        else:
+            update_loading_status("drive_service", True)  # Mark as "ready" even if not configured
     except Exception as e:
         print(f"Google Drive initialization failed: {e}")
+        update_loading_status("drive_service", True)  # Non-critical, mark as ready
     
     # Pinecone
     try:
+        print("📊 Initializing Pinecone...")
         pinecone_client = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
         index_name = os.getenv('PINECONE_INDEX_NAME')
         if index_name not in pinecone_client.list_indexes().names():
@@ -149,23 +185,90 @@ async def startup_event():
                 spec=ServerlessSpec(cloud='aws', region=os.getenv('PINECONE_REGION', 'us-west-2'))
             )
         pinecone_index = pinecone_client.Index(index_name)
+        update_loading_status("pinecone", True)
+        print("✅ Pinecone ready")
     except Exception as e:
-        print(f"Pinecone initialization failed: {e}")
+        print(f"❌ Pinecone initialization failed: {e}")
+        update_loading_status("pinecone", False)
     
     # Gemini AI
     try:
+        print("🤖 Initializing Gemini AI...")
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
         gemini_model = genai.GenerativeModel(GENERATION_MODEL_NAME)
+        update_loading_status("gemini", True)
+        print("✅ Gemini AI ready")
     except Exception as e:
-        print(f"Gemini AI initialization failed: {e}")
+        print(f"❌ Gemini AI initialization failed: {e}")
+        update_loading_status("gemini", False)
 
-    # MODIFIED: Initialize local and other models
-    print(f"Loading local embedding model: {EMBEDDING_MODEL_NAME}")
-    sentence_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    splade_encoder = SpladeEncoder()
-    cross_encoder = CrossEncoder('cross-encoder/ms-marco-minilm-l-6-v2')
-    print("All models initialized successfully.")
+    # Sentence Transformer (most memory-intensive)
+    try:
+        print(f"🧠 Loading SentenceTransformer model: {EMBEDDING_MODEL_NAME}")
+        sentence_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        update_loading_status("sentence_model", True)
+        print("✅ SentenceTransformer ready")
+    except Exception as e:
+        print(f"❌ SentenceTransformer initialization failed: {e}")
+        update_loading_status("sentence_model", False)
+    
+    # SPLADE Encoder (also memory-intensive)
+    try:
+        print("🔍 Loading SPLADE encoder...")
+        splade_encoder = SpladeEncoder()
+        update_loading_status("splade_encoder", True)
+        print("✅ SPLADE encoder ready")
+    except Exception as e:
+        print(f"❌ SPLADE encoder initialization failed: {e}")
+        update_loading_status("splade_encoder", False)
+    
+    # Cross Encoder
+    try:
+        print("🎯 Loading CrossEncoder...")
+        cross_encoder = CrossEncoder('cross-encoder/ms-marco-minilm-l-6-v2')
+        update_loading_status("cross_encoder", True)
+        print("✅ CrossEncoder ready")
+    except Exception as e:
+        print(f"❌ CrossEncoder initialization failed: {e}")
+        update_loading_status("cross_encoder", False)
+    
+    if loading_status["all_ready"]:
+        print("🎉 All models initialized successfully! API is fully ready.")
+    else:
+        print("⚠️  Some models failed to initialize. Check logs above.")
 
+@app.on_event("startup")
+async def startup_event():
+    """Fast startup - only start background loading"""
+    print("🚀 FastAPI server starting...")
+    print("📦 Models will load in the background...")
+    
+    # Start background initialization
+    asyncio.create_task(initialize_services_background())
+    
+    print("✅ Server is ready to accept requests!")
+    print("💡 Use GET /health to check model loading status")
+
+# --- Helper function to check if services are ready ---
+def check_services_ready():
+    """Check if required services are loaded"""
+    if not loading_status["all_ready"]:
+        ready_services = [k for k, v in loading_status.items() if v and k != "all_ready"]
+        pending_services = [k for k, v in loading_status.items() if not v and k != "all_ready"]
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Services still loading. Ready: {ready_services}. Pending: {pending_services}. Please wait and try again."
+        )
+
+# --- Health Check Endpoint ---
+@app.get("/health", response_model=ServiceStatus)
+async def health_check():
+    """Check the loading status of all services"""
+    return ServiceStatus(
+        models_loaded=loading_status["all_ready"],
+        services_ready=loading_status["all_ready"],
+        loading_progress=loading_status.copy()
+    )
 
 # --- Authentication ---
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -173,7 +276,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not token:
         raise HTTPException(status_code=401, detail="Authentication token required")
     return {"user_id": "user123"}
-
 
 # --- Document Processing & Embedding Utilities ---
 def extract_text_from_pdf(file_content: bytes) -> str:
@@ -185,7 +287,6 @@ def extract_text_from_docx(file_content: bytes) -> str:
     return "\n".join([p.text for p in doc.paragraphs])
 
 def upload_to_drive(file_content: bytes, filename: str, folder_id: str) -> Optional[str]:
-    # ... (This function is unchanged)
     if not drive_service:
         print("Drive service not initialized. Skipping upload.")
         return None
@@ -206,7 +307,6 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> List[st
     )
     return text_splitter.split_text(text)
 
-# --- REWRITTEN: store_in_pinecone for Hybrid Search with LOCAL embeddings ---
 def store_in_pinecone(chunks: List[str], document_id: str, metadata: dict):
     try:
         # 1. Get Dense Embeddings from local SentenceTransformer
@@ -232,7 +332,6 @@ def store_in_pinecone(chunks: List[str], document_id: str, metadata: dict):
         raise HTTPException(status_code=500, detail=f"Failed to store in vector database: {e}")
 
 # --- AI Analysis & Chat Logic ---
-# ... (analyze_with_gemini and clean_json_response are unchanged) ...
 def clean_json_response(text: str) -> Any:
     match = re.search(r'```json\s*([\s\S]*?)\s*```|(\[.*\]|\{.*\})', text, re.DOTALL)
     if not match: return None
@@ -265,7 +364,8 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
 # --- API Endpoints ---
 @app.post("/upload", response_model=DocumentAnalysisResponse)
 async def upload_document(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    # ... (This endpoint is unchanged) ...
+    check_services_ready()  # Ensure services are loaded
+    
     file_content = await file.read()
     file_extension = os.path.splitext(file.filename)[1].lower()
     
@@ -301,9 +401,10 @@ async def upload_document(file: UploadFile = File(...), user: dict = Depends(get
         upload_date=datetime.now(), file_url=file_url, **analysis_results
     )
 
-# --- REWRITTEN: /chat endpoint with LOCAL dense embeddings ---
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_document(chat_request: ChatMessage, user: dict = Depends(get_current_user)):
+    check_services_ready()  # Ensure services are loaded
+    
     try:
         # 1. Embed the query for both dense and sparse search
         dense_query_embedding = sentence_model.encode(chat_request.message).tolist()
@@ -360,14 +461,15 @@ async def chat_with_document(chat_request: ChatMessage, user: dict = Depends(get
         print(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail="Error processing chat request")
 
-
 @app.get("/documents")
 async def get_user_documents(user: dict = Depends(get_current_user)):
     """Get a list of all documents uploaded by the user."""
+    check_services_ready()
+    
     try:
         # A dummy query to fetch metadata by filtering
         response = pinecone_index.query(
-            vector=[0] * 768,  # Updated to match embedding dimension
+            vector=[0] * 768,
             filter={'user_id': user['user_id']},
             top_k=1000,
             include_metadata=True
@@ -390,9 +492,9 @@ async def get_user_documents(user: dict = Depends(get_current_user)):
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: str, user: dict = Depends(get_current_user)):
     """Delete a document and all its associated data from the vector store."""
+    check_services_ready()
+    
     try:
-        # Note: This does not delete the file from Google Drive.
-        # A more robust solution would involve a background task to do that.
         pinecone_index.delete(filter={
             'document_id': document_id,
             'user_id': user['user_id']
@@ -404,6 +506,9 @@ async def delete_document(document_id: str, user: dict = Depends(get_current_use
 @app.post("/translate")
 async def translate_text(request: TranslationRequest):
     """Translate text using Gemini AI."""
+    if not loading_status["gemini"]:
+        raise HTTPException(status_code=503, detail="Gemini AI is still loading. Please try again in a moment.")
+    
     supported_languages = ["hindi", "bengali", "tamil", "telugu", "marathi", "gujarati", "kannada", "malayalam", "punjabi", "urdu"]
     if request.target_language.lower() not in supported_languages:
         raise HTTPException(status_code=400, detail=f"Language '{request.target_language}' not supported.")
@@ -432,9 +537,8 @@ async def get_supported_languages():
             {"code": "urdu", "name": "Urdu"}
         ]
     }
-    
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT",8000))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
