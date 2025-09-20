@@ -35,7 +35,7 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 # --- Configuration & Initialization ---
 load_dotenv()
-app = FastAPI(title="Legal Document AI API - Advanced RAG", version="3.1.0")
+app = FastAPI(title="Legal Document AI API - Advanced RAG", version="3.2.0")
 security = HTTPBearer()
 
 # --- CORS Middleware ---
@@ -53,6 +53,7 @@ class DocumentAnalysisResponse(BaseModel):
     filename: str
     upload_date: datetime
     summary: str
+    key_points: List[str]  # Added key points
     risk_alerts: List[Dict[str, Any]]
     glossary: List[Dict[str, str]]
     file_url: Optional[str] = None
@@ -75,7 +76,7 @@ class ServiceStatus(BaseModel):
     loading_progress: Dict[str, bool]
 
 # --- Constants & Global Variables ---
-GENERATION_MODEL_NAME = "gemini-2.5-flash-lite"
+GENERATION_MODEL_NAME = "gemini-1.5-flash"
 EMBEDDING_MODEL_NAME = "all-mpnet-base-v2" 
 PINECONE_DIMENSION = 768
 
@@ -346,20 +347,29 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
     summary_prompt = f"Provide a concise, 150-word summary of the key legal points and implications of this document:\n\n{text}"
     risk_prompt = f"Scan this legal text. Identify clauses that could cost money, limit rights, or cause harm. List ONLY risks. Format as a JSON array of objects, each with 'severity' ('HIGH', 'MEDIUM', 'LOW') and 'description' (under 15 words). Respond with ```json ... ``` block:\n\n{text}"
     glossary_prompt = f"Extract important legal terms from the document that a non-lawyer might not know. Return a single valid JSON object where keys are the terms and values are plain-English explanations. Respond with ```json ... ``` block:\n\n{text}"
-    
+    key_points_prompt = f"Analyze this legal document and extract the 5-7 most critical key points or clauses that a person must know. Present them as a JSON array of strings. Each string should be a concise point. Respond with ```json ... ``` block:\n\n{text}"
+
     async def run_prompt(p):
         return await asyncio.to_thread(gemini_model.generate_content, p)
 
-    summary_res, risk_res, glossary_res = await asyncio.gather(
-        run_prompt(summary_prompt), run_prompt(risk_prompt), run_prompt(glossary_prompt)
+    summary_res, risk_res, glossary_res, key_points_res = await asyncio.gather(
+        run_prompt(summary_prompt), 
+        run_prompt(risk_prompt), 
+        run_prompt(glossary_prompt),
+        run_prompt(key_points_prompt)
     )
 
     summary = summary_res.text.strip()
     risks = clean_json_response(risk_res.text) or []
     glossary_data = clean_json_response(glossary_res.text) or {}
     glossary = [{"term": k, "definition": v} for k, v in glossary_data.items()]
+    key_points = clean_json_response(key_points_res.text) or []
+    
+    # Validate key_points is a list of strings
+    if not isinstance(key_points, list) or not all(isinstance(item, str) for item in key_points):
+        key_points = []
 
-    return {"summary": summary, "risk_alerts": risks, "glossary": glossary}
+    return {"summary": summary, "risk_alerts": risks, "glossary": glossary, "key_points": key_points}
 
 # --- API Endpoints ---
 @app.post("/upload", response_model=DocumentAnalysisResponse)
@@ -461,47 +471,6 @@ async def chat_with_document(chat_request: ChatMessage, user: dict = Depends(get
         print(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail="Error processing chat request")
 
-@app.get("/documents")
-async def get_user_documents(user: dict = Depends(get_current_user)):
-    """Get a list of all documents uploaded by the user."""
-    check_services_ready()
-    
-    try:
-        # A dummy query to fetch metadata by filtering
-        response = pinecone_index.query(
-            vector=[0] * 768,
-            filter={'user_id': user['user_id']},
-            top_k=1000,
-            include_metadata=True
-        )
-        
-        documents = {}
-        for match in response.matches:
-            doc_id = match.metadata.get('document_id')
-            if doc_id and doc_id not in documents:
-                documents[doc_id] = {
-                    'document_id': doc_id,
-                    'filename': match.metadata.get('filename'),
-                    'upload_date': match.metadata.get('upload_date')
-                }
-        
-        return list(documents.values())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving documents: {e}")
-
-@app.delete("/documents/{document_id}")
-async def delete_document(document_id: str, user: dict = Depends(get_current_user)):
-    """Delete a document and all its associated data from the vector store."""
-    check_services_ready()
-    
-    try:
-        pinecone_index.delete(filter={
-            'document_id': document_id,
-            'user_id': user['user_id']
-        })
-        return {"message": "Document and its embeddings deleted successfully."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting document: {e}")
 
 @app.post("/translate")
 async def translate_text(request: TranslationRequest):
