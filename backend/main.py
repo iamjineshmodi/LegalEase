@@ -76,7 +76,7 @@ class ServiceStatus(BaseModel):
     loading_progress: Dict[str, bool]
 
 # --- Constants & Global Variables ---
-GENERATION_MODEL_NAME = "gemini-1.5-flash"
+GENERATION_MODEL_NAME = "gemini-2.5-flash-lite"
 EMBEDDING_MODEL_NAME = "all-mpnet-base-v2" 
 PINECONE_DIMENSION = 768
 

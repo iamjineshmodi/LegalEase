@@ -1,110 +1,496 @@
-BACKEND for LegalEase using FASTAPI for Gemini Hackathon
+# LegalEase Backend
 
-# LegalEase
-Simlpify your legal documents in 1 click
+A sophisticated FastAPI backend for AI-powered legal document analysis, featuring advanced RAG (Retrieval-Augmented Generation) capabilities, hybrid search, and multi-language support.
 
-## BACKEND EXAMPLES AND HOW TO USE:
-go to backend directory
+## Features
+
+- **Document Processing**: Support for PDF, DOCX, and TXT file formats
+- **AI Analysis**: Comprehensive document analysis using Google Gemini AI
+  - Executive summaries
+  - Risk assessment and alerts
+  - Legal term glossary extraction
+  - Key points identification
+- **Advanced Search**: Hybrid vector search combining dense and sparse embeddings
+- **Real-time Chat**: RAG-powered document Q&A with source citations
+- **Cloud Storage**: Automatic Google Drive integration for file storage
+- **Multi-language Support**: Translation services for 10 Indian languages
+- **Fast Startup**: Background model loading for immediate API availability
+- **Production Ready**: CORS enabled, authentication middleware, error handling
+
+## Tech Stack
+
+### Core Framework
+- **FastAPI**: High-performance async web framework
+- **Python 3.8+**: Modern Python with async/await support
+
+### AI & ML
+- **Google Gemini AI**: Generative AI for document analysis and chat
+- **Sentence Transformers**: Local dense embeddings (`all-mpnet-base-v2`)
+- **SPLADE**: Sparse vector encoding for hybrid search
+- **Cross-Encoder**: Result re-ranking for improved relevance
+
+### Vector Database & Search
+- **Pinecone**: Managed vector database with hybrid search support
+- **LangChain**: Advanced text chunking and splitting
+
+### Cloud Services
+- **Google Drive API**: File storage and sharing
+- **Google OAuth2**: Secure authentication for Drive access
+
+### Document Processing
+- **PyMuPDF (fitz)**: High-performance PDF text extraction
+- **python-docx**: Microsoft Word document processing
+
+## Installation
+
+### Prerequisites
+- Python 3.8 or higher
+- pip package manager
+- Google Cloud Project with Drive API enabled
+- Pinecone account and API key
+- Google Gemini API key
+
+### Setup
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/iamjineshmodi/LegalEase.git
+   cd LegalEase/backend
+   ```
+
+2. **Create virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Environment Configuration**
+
+   Create a `.env` file in the backend directory:
+
+   ```env
+   # Google Services
+   GEMINI_API_KEY=your_gemini_api_key_here
+   GOOGLE_OAUTH_TOKEN_PATH=token.json
+
+   # Pinecone Configuration
+   PINECONE_API_KEY=your_pinecone_api_key
+   PINECONE_INDEX_NAME=legalease-documents
+   PINECONE_REGION=us-west-2
+
+   # Optional: Google Drive Folder
+   GOOGLE_DRIVE_FOLDER_ID=your_drive_folder_id
+   ```
+
+## Configuration
+
+### Google Drive Setup
+
+1. **Create Google Cloud Project**
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select existing one
+
+2. **Enable Drive API**
+   - Navigate to "APIs & Services" > "Library"
+   - Search for "Google Drive API" and enable it
+
+3. **Create OAuth Credentials**
+   - Go to "APIs & Services" > "Credentials"
+   - Create "OAuth 2.0 Client ID"
+   - Download the credentials JSON file
+   - Run the OAuth flow to generate `token.json`
+
+### Pinecone Setup
+
+1. **Create Account**
+   - Sign up at [Pinecone](https://www.pinecone.io/)
+
+2. **Create Index**
+   - Index name: `legalease-documents`
+   - Dimension: `768` (matches the embedding model)
+   - Metric: `dotproduct`
+   - Environment: Choose your preferred region
+
+### Model Configuration
+
+The system uses several AI models that load in the background:
+
+- **Embedding Model**: `all-mpnet-base-v2` (768 dimensions)
+- **Sparse Encoder**: `naver/splade-cocondenser-ensembledistil`
+- **Cross-Encoder**: `cross-encoder/ms-marco-minilm-l-6-v2`
+- **Generation Model**: `gemini-2.5-flash-lite`
+
+## API Endpoints
+
+### Health Check
+```http
+GET /health
 ```
-    python3 main.py 
+
+Returns loading status of all services and models.
+
+**Response:**
+```json
+{
+  "models_loaded": true,
+  "services_ready": true,
+  "loading_progress": {
+    "drive_service": true,
+    "pinecone": true,
+    "gemini": true,
+    "sentence_model": true,
+    "splade_encoder": true,
+    "cross_encoder": true,
+    "all_ready": true
+  }
+}
 ```
 
-
-
-1. /short-summary
+### Document Upload
+```http
+POST /upload
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
 ```
-curl -X POST "http://localhost:8000/short-summary" \
+
+Upload and analyze a legal document.
+
+**Parameters:**
+- `file`: Document file (PDF, DOCX, or TXT)
+
+**Response:**
+```json
+{
+  "document_id": "uuid-string",
+  "filename": "contract.pdf",
+  "upload_date": "2025-01-15T10:30:00",
+  "summary": "Executive summary of the document...",
+  "key_points": ["Point 1", "Point 2", "Point 3"],
+  "risk_alerts": [
+    {"severity": "HIGH", "description": "Penalty clause found"}
+  ],
+  "glossary": [
+    {"term": "Indemnification", "definition": "Legal protection against loss"}
+  ],
+  "file_url": "https://drive.google.com/file/d/..."
+}
+```
+
+### Document Chat
+```http
+POST /chat
+Content-Type: application/json
+Authorization: Bearer <token>
+```
+
+Ask questions about a specific document using RAG.
+
+**Request Body:**
+```json
+{
+  "message": "What are the payment terms?",
+  "document_id": "uuid-string"
+}
+```
+
+**Response:**
+```json
+{
+  "response": "According to the document, payment terms are...",
+  "sources": [
+    {
+      "chunk_index": 5,
+      "text": "Payment shall be made within 30 days...",
+      "relevance_score": 0.95
+    }
+  ]
+}
+```
+
+### List Documents
+```http
+GET /documents
+Authorization: Bearer <token>
+```
+
+Get all documents uploaded by the authenticated user.
+
+**Response:**
+```json
+[
+  {
+    "document_id": "uuid-string",
+    "filename": "contract.pdf",
+    "upload_date": "2025-01-15T10:30:00"
+  }
+]
+```
+
+### Delete Document
+```http
+DELETE /documents/{document_id}
+Authorization: Bearer <token>
+```
+
+Delete a document and all associated embeddings.
+
+### Translation
+```http
+POST /translate
+Content-Type: application/json
+```
+
+Translate text to supported Indian languages.
+
+**Request Body:**
+```json
+{
+  "text": "Legal contract terms",
+  "target_language": "hindi"
+}
+```
+
+**Response:**
+```json
+{
+  "translated_text": "कानूनी अनुबंध की शर्तें"
+}
+```
+
+### Supported Languages
+```http
+GET /supported-languages
+```
+
+Get list of supported translation languages.
+
+## Usage Examples
+
+### Python Client
+
+```python
+import requests
+
+# Check service health
+response = requests.get("http://localhost:8000/health")
+print(response.json())
+
+# Upload document
+files = {"file": open("contract.pdf", "rb")}
+headers = {"Authorization": "Bearer your-token"}
+response = requests.post("http://localhost:8000/upload", files=files, headers=headers)
+doc_data = response.json()
+
+# Chat with document
+chat_data = {
+    "message": "What are the key obligations?",
+    "document_id": doc_data["document_id"]
+}
+response = requests.post("http://localhost:8000/chat", json=chat_data, headers=headers)
+print(response.json())
+```
+
+### cURL Examples
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Upload document
+curl -X POST "http://localhost:8000/upload" \
+  -H "Authorization: Bearer your-token" \
+  -F "file=@contract.pdf"
+
+# Chat with document
+curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-token" \
   -d '{
-    "text": "This is a legal contract. you can assume some things that are heppening in this document"
+    "message": "Summarize the payment terms",
+    "document_id": "your-document-id"
   }'
 ```
 
-``` 
-RESPONSE:
+## Development
 
-{"summary":"The provided text states only that the document is a legal contract.  Without the actual content of the contract, a meaningful legal analysis is impossible.  To provide a summary as requested, the specific terms and conditions of the contract are absolutely necessary.  The following is a template of what the analysis *would* contain if the contract text were provided:\n\n\n**Legal Document Analysis (Template)**\n\n**Type of Document:**  (This would be determined from the contract's content. Examples: Rental Lease Agreement, Loan Agreement, Terms of Service, Employment Contract, etc.)\n\n**Parties Involved:** (This section would name the specific parties involved,  e.g., \"Landlord: John Smith; Tenant: Jane Doe\" or \"Company: Acme Corp; User:  Robert Jones\").\n\n**Key Obligations:**  (This section would detail the key obligations of each party as explicitly stated in the contract. For example, a tenant's obligation to pay rent, maintain the property in good condition, or adhere to specific rules; a landlord's obligation to provide habitable premises, make necessary repairs, etc.)\n\n**Important Clauses:** (This would highlight any significant clauses, such as those pertaining to termination (e.g., notice periods, grounds for termination), penalties for breach of contract (e.g., late fees, liquidated damages), dispute resolution mechanisms (e.g., arbitration, mediation, litigation), and liability limitations.)\n\n\n**Potential Risks:** (This would identify any potential risks or negative consequences for either party,  such as the financial risks associated with a loan agreement, potential for eviction in a lease, or limitations on liability in a terms of service agreement).\n\n\n**Overall Purpose:** (This section would explain the core objective of the contract in plain language. For example, \"This rental agreement establishes the terms under which John Smith leases his property to Jane Doe,\" or \"This contract outlines the terms and conditions governing the use of Acme Corp's software by Robert Jones.\")\n\n\nIn short, providing a proper legal analysis requires the actual contract text.  The current prompt only offers a statement that a legal contract exists, rendering a substantive analysis impossible."}
+### Running Locally
 
+```bash
+# Start the server
+python main.py
+
+# Or with uvicorn directly
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+The server will start immediately and begin loading models in the background. Use the `/health` endpoint to monitor loading progress.
 
-2. /risk-summary
-```
-curl -X POST "http://localhost:8000/risk-analysis" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "This legal contract establishes a commercial arrangement between the parties, but contains several clauses that may present material risks. The limitation of liability provision appears excessively broad, potentially leaving one party without meaningful remedies in the event of gross negligence or willful misconduct. The indemnification clause is unilateral, requiring only one party to assume extensive financial responsibility for third-party claims. Additionally, the termination rights are asymmetrical, permitting one party to exit the agreement with minimal notice while restricting the other party’s ability to do so. Confidentiality obligations are vaguely defined, creating uncertainty about the scope of protected information and potential exposure to liability. Finally, the absence of a clear dispute resolution mechanism may increase the likelihood of costly litigation."
-  }'
+### Testing
 
-```
+```bash
+# Run with pytest (if tests are added)
+pytest
 
-``` 
-RESPONSE:
-{"risk_alerts":["⚠️ HIGH RISK: Limited legal recourse for negligence","⚠️ HIGH RISK: One-sided financial responsibility","⚠️ HIGH RISK: Unequal termination rights","🟡 MEDIUM RISK: Unclear confidentiality rules","🟡 MEDIUM RISK: No clear dispute resolution"]}
-```
-
-3. /each-paragraph-summaries
-```
-curl -X POST "http://localhost:8000/each-paragraph-summaries" \
-  -H "Content-Type: application/json" \
-  -d '{                                                                              
-    "text": "This is a legal contract. you can assume some things that are heppening in this document"
-  }'
+# Manual testing with requests
+python -c "
+import requests
+resp = requests.get('http://localhost:8000/health')
+print('Status:', resp.json())
+"
 ```
 
-``` 
-RESPONSE:
-
-{"paragraph_summaries":{"Paragraph 1":"Plain English: This is a legally binding agreement.  Why it matters: This means everything written here is enforceable by law; if either party breaks the agreement, there could be legal consequences."}}%  
+### Code Structure
 
 ```
-
-4. /glossary-definitions
-```
-curl -X POST "http://localhost:8000/glossary-definitions" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "This is a legal contract. The parties hereto acknowledge and agree that any representations, warranties, and covenants contained herein shall be binding and enforceable to the fullest extent permissible under applicable law. The obligations stipulated are subject to conditions precedent, and any waiver thereof must be executed in writing by the duly authorized signatories. In the event of a material breach, the non-defaulting party shall be entitled to equitable relief, including but not limited to specific performance and injunctive remedies. Furthermore, all indemnification provisions shall survive termination and shall inure to the benefit of the successors and assigns of the parties."
-  }'
-```
-
-``` 
-RESPONSE::
-{"glossary":{"representations, warranties, and covenants":"promises and guarantees made in the contract","applicable law":"relevant laws","conditions precedent":"things that must happen before the contract is valid","waiver":"giving up a right","duly authorized signatories":"people officially allowed to sign","material breach":"a serious violation of the contract","non-defaulting party":"the person who didn't break the contract","equitable relief":"a fair solution","specific performance":"making someone do what the contract says","injunctive remedies":"court orders to stop someone from doing something","indemnification provisions":"parts of the contract about who pays if someone gets sued","shall survive termination":"will still apply even after the contract ends","successors and assigns":"people or companies that take over the contract from the original parties"}}
-```
-        
-
-5. \translate
-
-```
-curl -X POST "http://localhost:8000/translate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "This is a legal contract. The parties hereto acknowledge and agree that any representations, warranties, and covenants contained herein shall be binding and enforceable to the fullest extent permissible under applicable law. The obligations stipulated are subject to conditions precedent, and any waiver thereof must be executed in writing by the duly authorized signatories. In the event of a material breach, the non-defaulting party shall be entitled to equitable relief, including but not limited to specific performance and injunctive remedies. Furthermore, all indemnification provisions shall survive termination and shall inure to the benefit of the successors and assigns of the parties.",
-    "target_language": "hindi"
-  }'
+backend/
+├── main.py                 # Main FastAPI application
+├── requirements.txt        # Python dependencies
+├── prompts/               # AI prompt templates
+│   ├── chatbot.txt
+│   ├── high_risk.txt
+│   ├── legal_definitions.txt
+│   ├── para_by_para.txt
+│   ├── short_summary.txt
+│   └── translate.txt
+├── service_account.json   # Google service account (if used)
+├── temp.py               # Temporary/test code
+├── sample_main.py        # Alternative main file
+└── __pycache__/         # Python cache
 ```
 
-``` 
-RESPONSE:
+## Deployment
 
-{"translated_text":"यह एक विधिक अनुबंध है।  यहाँ पर पक्षकार स्वीकार करते हैं और सहमत होते हैं कि इसमें निहित कोई भी निरूपण, वारंटी और करार लागू कानून के अंतर्गत अधिकतम सीमा तक बाध्यकारी और प्रवर्तनीय होंगे।  निर्धारित दायित्व पूर्व शर्तों के अधीन हैं, और इनकी किसी भी छूट को विधिवत अधिकृत हस्ताक्षरकर्ताओं द्वारा लिखित में क्रियान्वित किया जाना चाहिए।  गंभीर उल्लंघन की स्थिति में, डिफ़ॉल्ट न करने वाले पक्ष को इक्विटेबल राहत का अधिकार होगा, जिसमें विशेष प्रदर्शन और निषेधात्मक उपचार शामिल हैं, लेकिन इन्हीं तक सीमित नहीं हैं।  इसके अलावा, सभी क्षतिपूर्ति प्रावधान समापन के बाद भी प्रभावी रहेंगे और पक्षकारों के उत्तराधिकारियों और अधिग्रहीताओं को लाभान्वित करेंगे।"}
+### Docker Deployment
 
+```dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-show homepage with a big action towards uploading pdf/txt/docx
+### Environment Variables for Production
 
-# MVP:
-1. show short summary of document
-2. high risk alerts
-3. show para by para summary
-4. legal glossary definitions
+```env
+# Server Configuration
+PORT=8000
+HOST=0.0.0.0
 
-optional:
-5. transaltion option to other indian languages
+# Logging
+LOG_LEVEL=INFO
 
-### keep these as 1 and 2 in direct show, others to click on dropbox type something and then show the rest.
+# Model Configuration
+EMBEDDING_MODEL=all-mpnet-base-v2
+GENERATION_MODEL=gemini-1.5-flash
 
+# Performance Tuning
+MAX_WORKERS=4
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=150
+```
 
-The workflow in the Home screen like: 
-Ask user to upload a pdf, or .txt file, parse it, and then send it to gemini api and give a short summary
+### Production Checklist
+
+- [ ] Set strong authentication tokens
+- [ ] Configure proper CORS origins
+- [ ] Set up monitoring and logging
+- [ ] Configure backup strategies for Pinecone data
+- [ ] Set up proper error tracking (Sentry, etc.)
+- [ ] Configure rate limiting
+- [ ] Set up health check monitoring
+- [ ] Configure proper SSL/TLS certificates
+
+## Security Considerations
+
+⚠️ **Important Security Notes**
+
+- JWT tokens are currently placeholder implementations
+- Implement proper token validation for production use
+- Google Drive integration requires secure OAuth flow
+- API keys should be stored securely (not in code)
+- Consider implementing rate limiting and request validation
+- Regular security audits of dependencies recommended
+
+## Performance Optimization
+
+### Model Loading Strategy
+- Models load asynchronously on startup for immediate API availability
+- Use `/health` endpoint to check loading status before heavy operations
+
+### Search Optimization
+- Hybrid search combines dense and sparse retrieval
+- Cross-encoder re-ranking improves result relevance
+- Configurable chunk size and overlap for different document types
+
+### Memory Management
+- Models are loaded once and reused across requests
+- ThreadPoolExecutor manages concurrent operations
+- Consider GPU acceleration for better performance
+
+## Troubleshooting
+
+### Common Issues
+
+**Models Still Loading**
+```
+HTTP 503: Services still loading. Ready: [...]. Pending: [...]
+```
+Wait for models to finish loading or check logs for errors.
+
+**Pinecone Connection Failed**
+- Verify API key and index configuration
+- Check network connectivity
+- Ensure index dimensions match embedding model (768)
+
+**Google Drive Upload Failed**
+- Verify OAuth credentials are valid
+- Check token refresh status
+- Ensure proper Drive API permissions
+
+**Memory Issues**
+- Reduce batch sizes in Pinecone operations
+- Consider using smaller embedding models
+- Monitor system resources during model loading
+
+### Logs and Debugging
+
+Enable debug logging:
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+Check model loading progress:
+```bash
+curl http://localhost:8000/health
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Support
+
+For support and questions:
+- Create an issue on GitHub
+- Check the troubleshooting section above
+- Review the API documentation at `/docs` when running locally
