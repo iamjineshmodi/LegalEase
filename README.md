@@ -1,4 +1,4 @@
-FASTAPIII
+BACKEND for LegalEase using FASTAPI for Gemini Hackathon
 
 # LegalEase
 Simlpify your legal documents in 1 click
