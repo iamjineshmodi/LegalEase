@@ -372,7 +372,15 @@ def clean_json_response(text: str) -> Any:
 
 async def analyze_with_gemini(text: str) -> Dict[str, Any]:
     summary_prompt = f"Provide a concise, 150-word summary of the key legal points and implications of this document:\n\n{text}"
-    risk_prompt = f"Scan this legal text. Identify clauses that could cost money, limit rights, or cause harm. List ONLY risks. Format as a JSON array of objects, each with 'severity' ('HIGH', 'MEDIUM', 'LOW') and 'description' (under 15 words). Respond with ```json ... ``` block:\n\n{text}"
+    risk_prompt = (
+        f"Scan this legal text. Identify clauses that could cost money, limit rights, or cause harm. "
+        f"List ONLY risks. For each risk, provide:\n"
+        f"- 'title': A short, descriptive name for the risk (under 5-6 words)\n"
+        f"- 'severity': One of 'HIGH', 'MEDIUM', 'LOW'\n"
+        f"- 'description': A concise summary (under 15 words)\n"
+        f"- 'suggested_action': A practical step to mitigate or address the risk (under 15 words)\n"
+        f"Format as a JSON array of objects, each with these four fields. Respond with a single valid ```json ... ``` block:\n\n{text}"
+    )
     glossary_prompt = f"Extract important legal terms from the document that a non-lawyer might not know. Return a single valid JSON object where keys are the terms and values are plain-English explanations. Respond with ```json ... ``` block:\n\n{text}"
     key_points_prompt = f"Analyze this legal document and extract the 5-7 most critical key points or clauses that a person must know. Present them as a JSON array of strings. Each string should be a concise point. Respond with ```json ... ``` block:\n\n{text}"
 
