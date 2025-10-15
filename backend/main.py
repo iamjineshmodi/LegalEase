@@ -23,11 +23,9 @@ from dotenv import load_dotenv
 # --- Service-specific Imports ---
 # Pinecone
 from pinecone import Pinecone, ServerlessSpec
-# Google
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+# Firebase Storage
+import firebase_admin
+from firebase_admin import credentials, storage
 import google.generativeai as genai
 # Transformers
 from sentence_transformers import SentenceTransformer, CrossEncoder
@@ -81,7 +79,8 @@ EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
 PINECONE_DIMENSION = 768
 
 # Global service variables
-drive_service = None
+firebase_app = None
+bucket = None
 pinecone_index = None
 gemini_model = None
 sentence_model = None
@@ -91,7 +90,7 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 # Loading status tracking
 loading_status = {
-    "drive_service": False,
+    "firebase": False,
     "pinecone": False,
     "gemini": False,
     "sentence_model": False,
@@ -136,15 +135,27 @@ class SpladeEncoder:
         return self._encode(query)
 
 # --- Service Initialization Functions ---
-def get_user_credentials() -> Optional[Credentials]:
-    token_path = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "token.json")
-    if not os.path.exists(token_path):
-        print(f"Warning: OAuth token file not found at {token_path}")
-        return None
-    creds = Credentials.from_authorized_user_file(token_path, scopes=["https://www.googleapis.com/auth/drive.file"])
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    return creds
+def initialize_firebase():
+    """Initialize Firebase Admin SDK"""
+    global firebase_app, bucket
+    try:
+        # Use service account key file
+        cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH", "firebase-service-account.json")
+        if not os.path.exists(cred_path):
+            print(f"Warning: Firebase service account key not found at {cred_path}")
+            return False
+
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(cred_path)
+            firebase_app = firebase_admin.initialize_app(cred, {
+                'storageBucket': os.getenv('FIREBASE_STORAGE_BUCKET')
+            })
+
+        bucket = storage.bucket()
+        return True
+    except Exception as e:
+        print(f"Firebase initialization failed: {e}")
+        return False
 
 def update_loading_status(service: str, status: bool):
     """Thread-safe status update"""
@@ -157,21 +168,20 @@ def update_loading_status(service: str, status: bool):
 
 async def initialize_services_background():
     """Background task to initialize all heavy services"""
-    global drive_service, pinecone_index, gemini_model, sentence_model, splade_encoder, cross_encoder
+    global firebase_app, bucket, pinecone_index, gemini_model, sentence_model, splade_encoder, cross_encoder
     
     print("🚀 Starting background service initialization...")
     
-    # Google Drive (optional, non-blocking)
+    # Firebase Storage (optional, non-blocking)
     try:
-        credentials = get_user_credentials()
-        if credentials:
-            drive_service = build('drive', 'v3', credentials=credentials)
-            update_loading_status("drive_service", True)
+        if initialize_firebase():
+            update_loading_status("firebase", True)
+            print("✅ Firebase Storage ready")
         else:
-            update_loading_status("drive_service", True)  # Mark as "ready" even if not configured
+            update_loading_status("firebase", True)  # Mark as "ready" even if not configured
     except Exception as e:
-        print(f"Google Drive initialization failed: {e}")
-        update_loading_status("drive_service", True)  # Non-critical, mark as ready
+        print(f"Firebase initialization failed: {e}")
+        update_loading_status("firebase", True)  # Non-critical, mark as ready
     
     # Pinecone
     try:
@@ -268,7 +278,15 @@ async def health_check():
     return ServiceStatus(
         models_loaded=loading_status["all_ready"],
         services_ready=loading_status["all_ready"],
-        loading_progress=loading_status.copy()
+        loading_progress={
+            "firebase_storage": loading_status["firebase"],
+            "pinecone": loading_status["pinecone"],
+            "gemini": loading_status["gemini"],
+            "sentence_model": loading_status["sentence_model"],
+            "splade_encoder": loading_status["splade_encoder"],
+            "cross_encoder": loading_status["cross_encoder"],
+            "all_ready": loading_status["all_ready"]
+        }
     )
 
 # --- Authentication ---
@@ -287,17 +305,26 @@ def extract_text_from_docx(file_content: bytes) -> str:
     doc = Document(io.BytesIO(file_content))
     return "\n".join([p.text for p in doc.paragraphs])
 
-def upload_to_drive(file_content: bytes, filename: str, folder_id: str) -> Optional[str]:
-    if not drive_service:
-        print("Drive service not initialized. Skipping upload.")
+def upload_to_firebase(file_content: bytes, filename: str) -> Optional[str]:
+    """Upload file to Firebase Storage and return download URL"""
+    if not bucket:
+        print("Firebase bucket not initialized. Skipping upload.")
         return None
     try:
-        file_metadata = {'name': filename, 'parents': [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype='application/octet-stream', resumable=True)
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        return file.get('id')
+        # Create a unique filename to avoid conflicts
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        blob = bucket.blob(unique_filename)
+
+        # Upload the file
+        blob.upload_from_string(file_content, content_type='application/octet-stream')
+
+        # Make the file publicly accessible (optional, depending on your needs)
+        blob.make_public()
+
+        # Return the public URL
+        return blob.public_url
     except Exception as e:
-        print(f"Drive upload error: {e}")
+        print(f"Firebase upload error: {e}")
         return None
 
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> List[str]:
@@ -392,19 +419,17 @@ async def upload_document(file: UploadFile = File(...), user: dict = Depends(get
     
     analysis_task = analyze_with_gemini(text)
     
-    drive_file_id = None
-    if folder_id := os.getenv('GOOGLE_DRIVE_FOLDER_ID'):
-        drive_file_id = await asyncio.to_thread(upload_to_drive, file_content, file.filename, folder_id)
+    file_url = None
+    if bucket:  # Check if Firebase is initialized
+        file_url = await asyncio.to_thread(upload_to_firebase, file_content, file.filename)
 
     analysis_results = await analysis_task
     
     metadata = {
         'document_id': document_id, 'filename': file.filename, 'user_id': user['user_id'],
-        'drive_file_id': drive_file_id or '', 'upload_date': datetime.now().isoformat(),
+        'file_url': file_url or '', 'upload_date': datetime.now().isoformat(),
     }
     await asyncio.to_thread(store_in_pinecone, chunks, document_id, metadata)
-    
-    file_url = f"https://drive.google.com/file/d/{drive_file_id}/view" if drive_file_id else None
     
     return DocumentAnalysisResponse(
         document_id=document_id, filename=file.filename,

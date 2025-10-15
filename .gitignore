@@ -5,3 +5,4 @@ backend/service_account.json
 backend/token.json
 backend/service_account2.json
 backend/client_secret.json
+backend/firebase-service-account.json
