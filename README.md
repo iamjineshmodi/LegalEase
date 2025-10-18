@@ -5,16 +5,18 @@ A sophisticated FastAPI backend for AI-powered legal document analysis, featurin
 ## Features
 
 - **Document Processing**: Support for PDF, DOCX, and TXT file formats
+- **Asynchronous Upload**: Background processing to handle long-running tasks (solves Vercel timeout issues)
 - **AI Analysis**: Comprehensive document analysis using Google Gemini AI
   - Executive summaries
-  - Risk assessment and alerts
+  - Risk assessment with suggested actions
   - Legal term glossary extraction
   - Key points identification
 - **Advanced Search**: Hybrid vector search combining dense and sparse embeddings
-- **Real-time Chat**: RAG-powered document Q&A with source citations
-- **Cloud Storage**: Automatic Google Drive integration for file storage
+- **Real-time Chat**: RAG-powered document Q&A with source citations and advisory capabilities
+- **Cloud Storage**: Firebase Storage integration for reliable file storage
 - **Multi-language Support**: Translation services for 10 Indian languages
 - **Fast Startup**: Background model loading for immediate API availability
+- **Job Queue System**: Track upload progress with polling-based status updates
 - **Production Ready**: CORS enabled, authentication middleware, error handling
 
 ## Tech Stack
@@ -34,8 +36,8 @@ A sophisticated FastAPI backend for AI-powered legal document analysis, featurin
 - **LangChain**: Advanced text chunking and splitting
 
 ### Cloud Services
-- **Google Drive API**: File storage and sharing
-- **Google OAuth2**: Secure authentication for Drive access
+- **Firebase Storage**: Reliable file storage with public URL access
+- **Google OAuth2**: Secure authentication (for Drive if needed)
 
 ### Document Processing
 - **PyMuPDF (fitz)**: High-performance PDF text extraction
@@ -76,20 +78,76 @@ A sophisticated FastAPI backend for AI-powered legal document analysis, featurin
    ```env
    # Google Services
    GEMINI_API_KEY=your_gemini_api_key_here
-   GOOGLE_OAUTH_TOKEN_PATH=token.json
+
+   # Firebase Configuration
+   FIREBASE_SERVICE_ACCOUNT_KEY_PATH=firebase-service-account.json
+   FIREBASE_STORAGE_BUCKET=your-project-id.appspot.com
 
    # Pinecone Configuration
    PINECONE_API_KEY=your_pinecone_api_key
    PINECONE_INDEX_NAME=legalease-documents
    PINECONE_REGION=us-west-2
-
-   # Optional: Google Drive Folder
-   GOOGLE_DRIVE_FOLDER_ID=your_drive_folder_id
    ```
+
+5. **Firebase Setup** (See [Firebase Setup Guide](ASYNC_UPLOAD_GUIDE.md) for details)
+   - Create a Firebase project
+   - Enable Firebase Storage
+   - Download service account key JSON
+   - Place it as `firebase-service-account.json` in the backend directory
+
+## Important: Asynchronous Upload System
+
+**⚠️ For Production (Vercel/Serverless)**: Use the asynchronous upload endpoints to avoid timeout issues.
+
+The system supports **asynchronous background processing** for document uploads, which is essential for serverless deployments with timeout limitations (e.g., Vercel's 60-second limit).
+
+### Quick Start (Async Upload)
+
+```bash
+# 1. Initiate upload (returns immediately with job_id)
+curl -X POST "http://localhost:8000/upload/initiate" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@document.pdf"
+
+# Response: {"job_id": "abc-123", "status": "pending", "message": "..."}
+
+# 2. Poll for status (repeat every 3-5 seconds)
+curl -X GET "http://localhost:8000/upload/status/abc-123" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Response includes status: pending, processing, completed, or failed
+```
+
+📚 **[Read the complete Async Upload Guide](ASYNC_UPLOAD_GUIDE.md)** for:
+- Detailed API documentation
+- Frontend implementation examples (JavaScript/React)
+- Best practices and polling strategies
+- Migration guide from synchronous to asynchronous
 
 ## Configuration
 
-### Google Drive Setup
+### Firebase Storage Setup
+
+1. **Create Firebase Project**
+   - Go to [Firebase Console](https://console.firebase.google.com/)
+   - Create a new project
+
+2. **Enable Storage**
+   - Navigate to Storage in the Firebase console
+   - Click "Get Started" and follow the setup
+
+3. **Create Service Account**
+   - Go to Project Settings > Service Accounts
+   - Click "Generate New Private Key"
+   - Save the JSON file as `firebase-service-account.json`
+
+4. **Update Environment Variables**
+   ```env
+   FIREBASE_SERVICE_ACCOUNT_KEY_PATH=firebase-service-account.json
+   FIREBASE_STORAGE_BUCKET=your-project-id.appspot.com
+   ```
+
+### Google Drive Setup (Legacy - Optional)
 
 1. **Create Google Cloud Project**
    - Go to [Google Cloud Console](https://console.cloud.google.com/)
@@ -140,7 +198,7 @@ Returns loading status of all services and models.
   "models_loaded": true,
   "services_ready": true,
   "loading_progress": {
-    "drive_service": true,
+    "firebase_storage": true,
     "pinecone": true,
     "gemini": true,
     "sentence_model": true,
@@ -151,14 +209,92 @@ Returns loading status of all services and models.
 }
 ```
 
-### Document Upload
+### Document Upload (Async - Recommended for Production)
+
+#### Initiate Upload
+```http
+POST /upload/initiate
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+```
+
+Returns immediately (202 Accepted) with a job ID for background processing.
+
+**Response:**
+```json
+{
+  "job_id": "uuid-string",
+  "status": "pending",
+  "message": "Document upload initiated. Use the job_id to check status."
+}
+```
+
+#### Check Upload Status
+```http
+GET /upload/status/{job_id}
+Authorization: Bearer <token>
+```
+
+Poll this endpoint to check processing status.
+
+**Response (Processing):**
+```json
+{
+  "job_id": "uuid-string",
+  "status": "processing",
+  "progress": "Analyzing document with AI...",
+  "result": null,
+  "error": null
+}
+```
+
+**Response (Completed):**
+```json
+{
+  "job_id": "uuid-string",
+  "status": "completed",
+  "progress": "Document analysis completed successfully",
+  "result": {
+    "document_id": "uuid-string",
+    "filename": "contract.pdf",
+    "upload_date": "2025-01-15T10:30:00",
+    "summary": "Executive summary of the document...",
+    "key_points": ["Point 1", "Point 2", "Point 3"],
+    "risk_alerts": [
+      {
+        "title": "High Penalty Clause",
+        "severity": "HIGH",
+        "description": "Penalty exceeds industry standards",
+        "suggested_action": "Negotiate penalty reduction or cap"
+      }
+    ],
+    "glossary": [
+      {"term": "Indemnification", "definition": "Legal protection against loss"}
+    ],
+    "file_url": "https://storage.googleapis.com/..."
+  },
+  "error": null
+}
+```
+
+#### Delete Job
+```http
+DELETE /upload/job/{job_id}
+Authorization: Bearer <token>
+```
+
+Clean up job data after retrieving results.
+
+### Document Upload (Sync - Legacy)
 ```http
 POST /upload
 Content-Type: multipart/form-data
 Authorization: Bearer <token>
 ```
 
-Upload and analyze a legal document.
+**⚠️ Not recommended for production on Vercel** - Use `/upload/initiate` instead to avoid timeout issues.
+
+Upload and analyze a legal document synchronously.
 
 **Parameters:**
 - `file`: Document file (PDF, DOCX, or TXT)
@@ -177,7 +313,7 @@ Upload and analyze a legal document.
   "glossary": [
     {"term": "Indemnification", "definition": "Legal protection against loss"}
   ],
-  "file_url": "https://drive.google.com/file/d/..."
+  "file_url": "https://storage.googleapis.com/..."
 }
 ```
 
@@ -193,7 +329,7 @@ Ask questions about a specific document using RAG.
 **Request Body:**
 ```json
 {
-  "message": "What are the payment terms?",
+  "message": "What are the payment terms? Should I accept this clause?",
   "document_id": "uuid-string"
 }
 ```
@@ -201,7 +337,7 @@ Ask questions about a specific document using RAG.
 **Response:**
 ```json
 {
-  "response": "According to the document, payment terms are...",
+  "response": "According to the document, payment terms require 30 days net. Given the late payment penalties, I recommend setting up automatic payments to avoid fees. However, you should consult with legal counsel before signing.",
   "sources": [
     {
       "chunk_index": 5,
@@ -275,23 +411,54 @@ Get list of supported translation languages.
 
 ```python
 import requests
+import time
 
 # Check service health
 response = requests.get("http://localhost:8000/health")
 print(response.json())
 
-# Upload document
+# Async upload (recommended)
 files = {"file": open("contract.pdf", "rb")}
 headers = {"Authorization": "Bearer your-token"}
-response = requests.post("http://localhost:8000/upload", files=files, headers=headers)
-doc_data = response.json()
 
-# Chat with document
+# 1. Initiate upload
+response = requests.post(
+    "http://localhost:8000/upload/initiate", 
+    files=files, 
+    headers=headers
+)
+job_data = response.json()
+job_id = job_data["job_id"]
+
+# 2. Poll for completion
+while True:
+    response = requests.get(
+        f"http://localhost:8000/upload/status/{job_id}",
+        headers=headers
+    )
+    status_data = response.json()
+    
+    print(f"Status: {status_data['status']} - {status_data.get('progress', '')}")
+    
+    if status_data['status'] == 'completed':
+        doc_data = status_data['result']
+        break
+    elif status_data['status'] == 'failed':
+        print("Error:", status_data['error'])
+        break
+    
+    time.sleep(3)  # Wait 3 seconds
+
+# 3. Chat with document
 chat_data = {
     "message": "What are the key obligations?",
     "document_id": doc_data["document_id"]
 }
-response = requests.post("http://localhost:8000/chat", json=chat_data, headers=headers)
+response = requests.post(
+    "http://localhost:8000/chat", 
+    json=chat_data, 
+    headers=headers
+)
 print(response.json())
 ```
 
@@ -301,7 +468,17 @@ print(response.json())
 # Health check
 curl http://localhost:8000/health
 
-# Upload document
+# Async upload (recommended)
+# 1. Initiate
+curl -X POST "http://localhost:8000/upload/initiate" \
+  -H "Authorization: Bearer your-token" \
+  -F "file=@contract.pdf"
+
+# 2. Check status (use job_id from response)
+curl -X GET "http://localhost:8000/upload/status/{job_id}" \
+  -H "Authorization: Bearer your-token"
+
+# Sync upload (legacy - not recommended for production)
 curl -X POST "http://localhost:8000/upload" \
   -H "Authorization: Bearer your-token" \
   -F "file=@contract.pdf"

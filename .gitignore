@@ -6,3 +6,5 @@ backend/token.json
 backend/service_account2.json
 backend/client_secret.json
 backend/firebase-service-account.json
+UPSTASH_REDIS_SETUP.md
+ASYNC_UPLOAD_GUIDE.md

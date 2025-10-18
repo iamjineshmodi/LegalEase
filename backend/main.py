@@ -27,6 +27,8 @@ from pinecone import Pinecone, ServerlessSpec
 import firebase_admin
 from firebase_admin import credentials, storage
 import google.generativeai as genai
+# Upstash Redis for distributed job storage
+from upstash_redis import Redis
 # Transformers
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from transformers import AutoTokenizer, AutoModelForMaskedLM
@@ -55,6 +57,18 @@ class DocumentAnalysisResponse(BaseModel):
     risk_alerts: List[Dict[str, Any]]
     glossary: List[Dict[str, str]]
     file_url: Optional[str] = None
+
+class JobInitiateResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str  # "pending", "processing", "completed", "failed"
+    progress: Optional[str] = None
+    result: Optional[DocumentAnalysisResponse] = None
+    error: Optional[str] = None
 
 class ChatMessage(BaseModel):
     message: str
@@ -87,6 +101,11 @@ sentence_model = None
 splade_encoder = None
 cross_encoder = None
 executor = ThreadPoolExecutor(max_workers=4)
+redis_client = None
+
+# Job storage (fallback to in-memory if Redis is not available)
+job_storage: Dict[str, Dict[str, Any]] = {}
+job_storage_lock = threading.Lock()
 
 # Loading status tracking
 loading_status = {
@@ -135,6 +154,33 @@ class SpladeEncoder:
         return self._encode(query)
 
 # --- Service Initialization Functions ---
+def initialize_redis():
+    """Initialize Upstash Redis client for distributed job storage"""
+    global redis_client
+    try:
+        redis_url = os.getenv("UPSTASH_REDIS_REST_URL")
+        redis_token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        
+        if not redis_url or not redis_token:
+            print("⚠️  UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not found in environment")
+            print("📝 Falling back to in-memory job storage (not recommended for production)")
+            redis_client = None
+            return False
+        
+        redis_client = Redis(url=redis_url, token=redis_token)
+        
+        # Test connection
+        redis_client.set("test_connection", "ok", ex=5)
+        test_value = redis_client.get("test_connection")
+        
+        print("✅ Upstash Redis connection established")
+        return True
+    except Exception as e:
+        print(f"⚠️  Upstash Redis connection failed: {e}")
+        print("📝 Falling back to in-memory job storage (not recommended for production)")
+        redis_client = None
+        return False
+
 def initialize_firebase():
     """Initialize Firebase Admin SDK"""
     global firebase_app, bucket
@@ -171,6 +217,12 @@ async def initialize_services_background():
     global firebase_app, bucket, pinecone_index, gemini_model, sentence_model, splade_encoder, cross_encoder
     
     print("🚀 Starting background service initialization...")
+    
+    # Redis (for distributed job storage)
+    try:
+        initialize_redis()
+    except Exception as e:
+        print(f"Redis initialization failed: {e}")
     
     # Firebase Storage (optional, non-blocking)
     try:
@@ -257,8 +309,37 @@ async def startup_event():
     # Start background initialization
     asyncio.create_task(initialize_services_background())
     
+    # Start periodic job cleanup (remove jobs older than 1 hour)
+    asyncio.create_task(periodic_job_cleanup())
+    
     print("✅ Server is ready to accept requests!")
     print("💡 Use GET /health to check model loading status")
+
+async def periodic_job_cleanup():
+    """Periodically clean up old completed/failed jobs"""
+    while True:
+        await asyncio.sleep(600)  # Run every 10 minutes
+        try:
+            # Redis jobs expire automatically with TTL, only clean in-memory storage
+            if not redis_client:
+                with job_storage_lock:
+                    now = datetime.now()
+                    jobs_to_delete = []
+                    
+                    for job_id, job_data in job_storage.items():
+                        updated_at = datetime.fromisoformat(job_data.get('updated_at', job_data.get('created_at', datetime.now().isoformat())))
+                        age_minutes = (now - updated_at).total_seconds() / 60
+                        
+                        # Delete completed/failed jobs older than 60 minutes
+                        if job_data.get('status') in ['completed', 'failed'] and age_minutes > 60:
+                            jobs_to_delete.append(job_id)
+                    
+                    for job_id in jobs_to_delete:
+                        del job_storage[job_id]
+                        print(f"🧹 Cleaned up old job: {job_id}")
+                    
+        except Exception as e:
+            print(f"Error in job cleanup: {e}")
 
 # --- Helper function to check if services are ready ---
 def check_services_ready():
@@ -359,6 +440,216 @@ def store_in_pinecone(chunks: List[str], document_id: str, metadata: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to store in vector database: {e}")
 
+# --- Job Management Functions ---
+def update_job_status(job_id: str, status: str, progress: str = None, result: Dict[str, Any] = None, error: str = None):
+    """Update job status in Redis or fallback to in-memory storage"""
+    job_data = {
+        'job_id': job_id,
+        'status': status,
+        'updated_at': datetime.now().isoformat()
+    }
+    
+    if progress:
+        job_data['progress'] = progress
+    if result:
+        job_data['result'] = json.dumps(result)  # Serialize result for Redis
+    if error:
+        job_data['error'] = error
+    
+    # Try Redis first
+    if redis_client:
+        try:
+            # Get existing job data first
+            existing_data_raw = redis_client.hgetall(f"job:{job_id}")
+            
+            # Decode bytes to strings if needed
+            existing_data = {}
+            if existing_data_raw:
+                for key, value in existing_data_raw.items():
+                    # Handle both string and bytes keys/values
+                    k = key.decode('utf-8') if isinstance(key, bytes) else key
+                    v = value.decode('utf-8') if isinstance(value, bytes) else value
+                    existing_data[k] = v
+            
+            # Merge with new data
+            existing_data.update(job_data)
+            
+            # Store each field individually using hmset
+            redis_client.hmset(f"job:{job_id}", existing_data)
+            redis_client.expire(f"job:{job_id}", 3600)  # 1 hour TTL
+            
+            print(f"✅ Updated job {job_id} in Redis with status: {status}")
+            return
+        except Exception as e:
+            print(f"❌ Redis error in update_job_status: {e}, falling back to in-memory")
+    
+    # Fallback to in-memory storage
+    with job_storage_lock:
+        if job_id in job_storage:
+            job_storage[job_id].update(job_data)
+        else:
+            job_storage[job_id] = job_data
+
+def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve job status from Redis or fallback to in-memory storage"""
+    # Try Redis first
+    if redis_client:
+        try:
+            job_data_raw = redis_client.hgetall(f"job:{job_id}")
+            
+            if not job_data_raw:
+                print(f"⚠️  Job {job_id} not found in Redis")
+                # Try in-memory as fallback
+                with job_storage_lock:
+                    return job_storage.get(job_id)
+            
+            # Decode bytes to strings
+            job_data = {}
+            for key, value in job_data_raw.items():
+                k = key.decode('utf-8') if isinstance(key, bytes) else key
+                v = value.decode('utf-8') if isinstance(value, bytes) else value
+                job_data[k] = v
+            
+            # Deserialize result if present
+            if 'result' in job_data and job_data['result']:
+                try:
+                    job_data['result'] = json.loads(job_data['result'])
+                except json.JSONDecodeError as e:
+                    print(f"⚠️  Failed to decode result JSON: {e}")
+                    pass
+            
+            print(f"✅ Retrieved job {job_id} from Redis: status={job_data.get('status')}")
+            return job_data
+            
+        except Exception as e:
+            print(f"❌ Redis error in get_job_status: {e}, falling back to in-memory")
+    
+    # Fallback to in-memory storage
+    with job_storage_lock:
+        job = job_storage.get(job_id)
+        if job:
+            print(f"✅ Retrieved job {job_id} from in-memory storage")
+        else:
+            print(f"⚠️  Job {job_id} not found in in-memory storage")
+        return job
+
+def create_job(job_id: str, initial_data: Dict[str, Any]):
+    """Create a new job in Redis or in-memory storage"""
+    job_data = {
+        'job_id': job_id,
+        'created_at': datetime.now().isoformat(),
+        'updated_at': datetime.now().isoformat(),
+        **initial_data
+    }
+    
+    # Try Redis first
+    if redis_client:
+        try:
+            # Serialize result if present
+            if 'result' in job_data and job_data['result']:
+                job_data['result'] = json.dumps(job_data['result'])
+            
+            # Use hmset to set all fields at once
+            redis_client.hmset(f"job:{job_id}", job_data)
+            redis_client.expire(f"job:{job_id}", 3600)  # 1 hour TTL
+            
+            print(f"✅ Created job {job_id} in Redis")
+            return
+        except Exception as e:
+            print(f"❌ Redis error in create_job: {e}, falling back to in-memory")
+    
+    # Fallback to in-memory storage
+    with job_storage_lock:
+        job_storage[job_id] = job_data
+        print(f"✅ Created job {job_id} in in-memory storage")
+
+def delete_job(job_id: str) -> bool:
+    """Delete a job from Redis or in-memory storage"""
+    # Try Redis first
+    if redis_client:
+        try:
+            deleted = redis_client.delete(f"job:{job_id}")
+            print(f"✅ Deleted job {job_id} from Redis: {deleted > 0}")
+            return deleted > 0
+        except Exception as e:
+            print(f"❌ Redis error in delete_job: {e}, falling back to in-memory")
+    
+    # Fallback to in-memory storage
+    with job_storage_lock:
+        if job_id in job_storage:
+            del job_storage[job_id]
+            print(f"✅ Deleted job {job_id} from in-memory storage")
+            return True
+        return False
+
+async def process_document_background(job_id: str, file_content: bytes, filename: str, file_extension: str, user_id: str):
+    """Background task to process document upload and analysis"""
+    try:
+        # Update status to processing
+        update_job_status(job_id, "processing", "Extracting text from document...")
+        
+        # Extract text based on file type
+        text_extractors = {
+            '.pdf': extract_text_from_pdf, 
+            '.docx': extract_text_from_docx, 
+            '.txt': lambda c: c.decode('utf-8')
+        }
+        
+        if file_extension not in text_extractors:
+            update_job_status(job_id, "failed", error=f"Unsupported file type: {file_extension}")
+            return
+        
+        text = text_extractors[file_extension](file_content)
+        if not text.strip():
+            update_job_status(job_id, "failed", error="Could not extract text from document.")
+            return
+        
+        # Generate document ID
+        document_id = str(uuid.uuid4())
+        
+        # Update status
+        update_job_status(job_id, "processing", "Chunking document text...")
+        chunks = chunk_text(text)
+        
+        # Upload to Firebase (if configured)
+        update_job_status(job_id, "processing", "Uploading file to storage...")
+        file_url = None
+        if bucket:
+            file_url = await asyncio.to_thread(upload_to_firebase, file_content, filename)
+        
+        # Analyze with Gemini
+        update_job_status(job_id, "processing", "Analyzing document with AI...")
+        analysis_results = await analyze_with_gemini(text)
+        
+        # Store in Pinecone
+        update_job_status(job_id, "processing", "Storing embeddings in vector database...")
+        metadata = {
+            'document_id': document_id,
+            'filename': filename,
+            'user_id': user_id,
+            'file_url': file_url or '',
+            'upload_date': datetime.now().isoformat(),
+        }
+        await asyncio.to_thread(store_in_pinecone, chunks, document_id, metadata)
+        
+        # Prepare final result
+        result = {
+            'document_id': document_id,
+            'filename': filename,
+            'upload_date': datetime.now().isoformat(),
+            'file_url': file_url,
+            **analysis_results
+        }
+        
+        # Mark as completed
+        update_job_status(job_id, "completed", "Document analysis completed successfully", result=result)
+        print(f"✅ Job {job_id} completed successfully")
+        
+    except Exception as e:
+        error_msg = f"Error processing document: {str(e)}"
+        print(f"❌ Job {job_id} failed: {error_msg}")
+        update_job_status(job_id, "failed", error=error_msg)
+
 # --- AI Analysis & Chat Logic ---
 def clean_json_response(text: str) -> Any:
     match = re.search(r'```json\s*([\s\S]*?)\s*```|(\[.*\]|\{.*\})', text, re.DOTALL)
@@ -407,8 +698,107 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
     return {"summary": summary, "risk_alerts": risks, "glossary": glossary, "key_points": key_points}
 
 # --- API Endpoints ---
+@app.post("/upload/initiate", response_model=JobInitiateResponse, status_code=202)
+async def initiate_document_upload(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...), 
+    user: dict = Depends(get_current_user)
+):
+    """Initiate document upload and return job ID immediately (202 Accepted)"""
+    check_services_ready()  # Ensure services are loaded
+    
+    # Read file content
+    file_content = await file.read()
+    file_extension = os.path.splitext(file.filename)[1].lower()
+    
+    # Validate file type
+    supported_types = ['.pdf', '.docx', '.txt']
+    if file_extension not in supported_types:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
+    
+    # Generate job ID
+    job_id = str(uuid.uuid4())
+    
+    # Initialize job in storage (Redis or in-memory)
+    create_job(job_id, {
+        'status': 'pending',
+        'progress': 'Job initiated, waiting to start processing...',
+        'result': None,
+        'error': None
+    })
+    
+    # Verify job was created
+    verify_job = get_job_status(job_id)
+    if not verify_job:
+        print(f"❌ WARNING: Job {job_id} was not found immediately after creation!")
+    else:
+        print(f"✅ Job {job_id} verified in storage after creation")
+    
+    # Schedule background processing
+    background_tasks.add_task(
+        process_document_background,
+        job_id=job_id,
+        file_content=file_content,
+        filename=file.filename,
+        file_extension=file_extension,
+        user_id=user['user_id']
+    )
+    
+    print(f"📋 Job {job_id} initiated for file: {file.filename}")
+    
+    return JobInitiateResponse(
+        job_id=job_id,
+        status="pending",
+        message="Document upload initiated. Use the job_id to check status."
+    )
+
+# --- Enhanced status endpoint with better error messages ---
+@app.get("/upload/status/{job_id}", response_model=JobStatusResponse)
+async def get_upload_status(job_id: str, user: dict = Depends(get_current_user)):
+    """Check the status of a document upload job"""
+    print(f"🔍 Checking status for job: {job_id}")
+    
+    job = get_job_status(job_id)
+    
+    if not job:
+        # Try to list all jobs for debugging
+        if redis_client:
+            try:
+                keys = redis_client.keys("job:*")
+                print(f"📋 Active jobs in Redis: {len(keys) if keys else 0}")
+                if keys:
+                    print(f"   Sample keys: {[k.decode('utf-8') if isinstance(k, bytes) else k for k in keys[:5]]}")
+            except Exception as e:
+                print(f"⚠️  Could not list Redis keys: {e}")
+        else:
+            with job_storage_lock:
+                print(f"📋 Active jobs in memory: {len(job_storage)}")
+                if job_storage:
+                    print(f"   Sample keys: {list(job_storage.keys())[:5]}")
+        
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Job {job_id} not found. It may have expired or never existed."
+        )
+    
+    # Prepare response
+    response = JobStatusResponse(
+        job_id=job['job_id'],
+        status=job['status'],
+        progress=job.get('progress'),
+        error=job.get('error')
+    )
+    
+    # If completed, include the result
+    if job['status'] == 'completed' and job.get('result'):
+        response.result = DocumentAnalysisResponse(**job['result'])
+    
+    print(f"✅ Returning status for job {job_id}: {job['status']}")
+    return response
+# --- Legacy synchronous upload endpoint (kept for backward compatibility) ---
 @app.post("/upload", response_model=DocumentAnalysisResponse)
 async def upload_document(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Legacy synchronous upload endpoint - use /upload/initiate for production"""
     check_services_ready()  # Ensure services are loaded
     
     file_content = await file.read()
@@ -443,6 +833,14 @@ async def upload_document(file: UploadFile = File(...), user: dict = Depends(get
         document_id=document_id, filename=file.filename,
         upload_date=datetime.now(), file_url=file_url, **analysis_results
     )
+
+@app.delete("/upload/job/{job_id}")
+async def delete_job_endpoint(job_id: str, user: dict = Depends(get_current_user)):
+    """Delete a job from storage"""
+    if delete_job(job_id):
+        return {"message": f"Job {job_id} deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Job not found")
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_document(chat_request: ChatMessage, user: dict = Depends(get_current_user)):
@@ -485,16 +883,22 @@ async def chat_with_document(chat_request: ChatMessage, user: dict = Depends(get
 
         # 5. Generate a response with Gemini
         prompt = f"""
-        Based ONLY on the following context from a legal document, answer the user's question.
-        Answer in a clear, helpful tone. If the context doesn't contain the answer, state that.
+        You are a legal assistant helping users understand their legal documents. Answer questions based primarily on the provided context from the legal document.
 
-        Context:
+        Guidelines:
+        - Answer questions directly from the document context when possible
+        - If the user asks for advice or recommendations or your opinion, provide practical, general legal guidance based on the document content
+        - Be clear and helpful in your responses
+        - If information is not available in the context, clearly state this limitation
+        - When giving advice, emphasize that you're not a substitute for professional legal counsel
+
+        Context from the legal document:
         {context}
 
         User's Question:
         {chat_request.message}
 
-        Answer:
+        Response:
         """
         response = await asyncio.to_thread(gemini_model.generate_content, prompt)
         
@@ -539,6 +943,36 @@ async def get_supported_languages():
             {"code": "urdu", "name": "Urdu"}
         ]
     }
+
+@app.get("/debug/redis-test")
+async def test_redis():
+    """Test Redis connection and operations"""
+    if not redis_client:
+        return {"error": "Redis client not initialized"}
+    
+    try:
+        # Test basic operations
+        test_key = "test:connection"
+        redis_client.set(test_key, "working", ex=10)
+        value = redis_client.get(test_key)
+        
+        # Test hash operations
+        test_hash = "test:hash"
+        redis_client.hmset(test_hash, {"field1": "value1", "field2": "value2"})
+        redis_client.expire(test_hash, 10)
+        hash_data = redis_client.hgetall(test_hash)
+        
+        return {
+            "redis_connected": True,
+            "test_value": value.decode('utf-8') if isinstance(value, bytes) else value,
+            "hash_data": {
+                k.decode('utf-8') if isinstance(k, bytes) else k: 
+                v.decode('utf-8') if isinstance(v, bytes) else v 
+                for k, v in hash_data.items()
+            }
+        }
+    except Exception as e:
+        return {"error": str(e), "redis_connected": False}
 
 if __name__ == "__main__":
     import uvicorn
