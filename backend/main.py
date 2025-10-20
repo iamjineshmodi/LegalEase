@@ -670,7 +670,8 @@ async def analyze_with_gemini(text: str) -> Dict[str, Any]:
         f"- 'severity': One of 'HIGH', 'MEDIUM', 'LOW'\n"
         f"- 'description': A concise summary (under 15 words)\n"
         f"- 'suggested_action': A practical step to mitigate or address the risk (under 15 words)\n"
-        f"Format as a JSON array of objects, each with these four fields. Respond with a single valid ```json ... ``` block:\n\n{text}"
+        f"- 'clause_text': The exact text/clause from the document where this risk appears (under 50 words). Get the exact clause from the document word to word don't make anything from your own side just keep this to the document.\n"
+        f"Format as a JSON array of objects, each with these five fields. Respond with a single valid ```json ... ``` block:\n\n{text}"
     )
     glossary_prompt = f"Extract important legal terms from the document that a non-lawyer might not know. Return a single valid JSON object where keys are the terms and values are plain-English explanations. Respond with ```json ... ``` block:\n\n{text}"
     key_points_prompt = f"Analyze this legal document and extract the 5-7 most critical key points or clauses that a person must know. Present them as a JSON array of strings. Each string should be a concise point. Respond with ```json ... ``` block:\n\n{text}"
